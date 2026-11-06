@@ -42,6 +42,43 @@ generated automatically. After a successful run:
 ssh -i nokiakey root@192.168.12.1
 ```
 
+## Hidden accounts (found via root + `cfgcli -a`)
+
+The config database (`cfgcli -a`) holds several accounts beyond the label `admin`
+(`InternetGatewayDevice.X_Authentication.Account`, Priority 2):
+
+| Account | Where | Priority | Password storage |
+|---|---|---|---|
+| `admin` | `X_Authentication.Account` | 2 | `sab`-encrypted (label default) |
+| `superadmin` | `X_Authentication.WebAccount` | **1** | `sab`-encrypted, has separate `PresetPassword` |
+| `telecomadmin` | `X_CT-COM_TeleComAccount` | — | `sab`-encrypted, **never changed from factory default** |
+| `superuser` | `X_Authentication.WebGlobeAccount` | 1 | **plaintext `123456789`** in config |
+| `user` | `X_Authentication.GlobeAccount` | 2 | **plaintext `123456789`** in config |
+
+Only `Account` (admin) and `WebAccount` (superadmin) are consulted by
+`/webs/login_web_app.cgi`; the others are dormant in this login flow.
+`superadmin` is also a Linux account baked into the image (`/usr/etc/passwd`)
+with **uid=0, gid=102, shell /bin/ash** — a second root; its factory
+SHA-crypt hash lives in `/usr/etc/shadow`.
+
+`sab` is the vendor's AES-256-CBC config-value encryption (key embedded, see
+`/usr/sbin/encrypt_client_app`, `ealgo="sab" kn="key11"`); no offline
+decryption shortcut was found, and a ~35-word dictionary did not crack the
+baked root/superadmin hashes.
+
+**Taking over superadmin (no cracking needed, persistent in flash):**
+
+```bash
+cfgcli -s "InternetGatewayDevice.X_Authentication.WebAccount.Password" 'NewSuper@123'
+cfgcli --save-flash-now
+# then log into the WebUI as superadmin / NewSuper@123 -> {"result":0,"is_ctc_admin":1}
+```
+
+`is_ctc_admin:1` in the login response marks carrier-level privileges.
+Web login has a per-account failure counter: too many bad attempts give
+*"Too many failed attempts, account temporarily locked"* — go easy on
+dictionary attempts. Password policy: 8–24 chars from `!#+,-./:=@_` + alnum.
+
 ## Enabling root password login (post-root)
 
 Out of the box, root password login over SSH **never works** on this firmware,
