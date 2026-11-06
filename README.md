@@ -129,6 +129,39 @@ Related boot mechanics (all verified):
   -g 0`) — reachable from other code paths (OmciDB/UserInfo), not via
   TelnetSshAccount (always gid 102, shell hardcoded `/usr/bin/vtysh`).
 
+## UART-less boot: why it is impossible (verified on hardware)
+
+The PR installs OpenWrt into the eMMC tail and boots it via U-Boot commands
+typed over UART on every boot. We tried to eliminate the UART entirely —
+`bootcmd` in `0:APPSBLENV` does not help, because **this U-Boot's autoboot
+never executes `bootcmd`**: after the countdown it runs the vendor `bootipq`
+flow directly (`boot_fail_count` / `sb_value` slot logic), which:
+
+1. reads `0:HLOS` — a fake-ELF32 container (`e_phoff=0x34`, 3 phdrs; the
+   PT_LOAD segment at file offset `0x2000` is a FIT) into `0x44000000`,
+2. derives the FIT config name from the device partnumber
+   (`config@3TN00201AB`, `fdt@3TN00201AB`) — a config named `config@1` is
+   ignored,
+3. passes the kernel to QSEE signed-image verification
+   (`cmd_bootqca.c:937 do_boot_signedimg()`).
+
+With **Secure Boot fused On** (`S - Secure Boot: On` in the SBL1 log), an
+unsigned FIT — even byte-perfect in container structure, with the right config
+name and valid crc32/sha1 hashes — is rejected with
+`Kernel image authentication failed`, the U-Boot `BUG!` handler resets the
+board, and `boot_fail_count` increments; after repeated failures the vendor
+logic switches to the second slot (`0:HLOS_1`). `APPSBL` (U-Boot) itself is
+signature-verified by SBL1, so patching the bootloader is out too. The stock
+kernel has `CONFIG_KEXEC is not set`, so there is no kexec bridge from the
+running stock system either.
+
+Conclusion: the author's approach (UART + `bootm` of the unsigned FIT on every
+boot, automated by a Raspberry Pi Pico) is the only way to run OpenWrt on this
+device. The FIT-config-name discovery above still matters for anyone
+reproducing the manual boot: the stock `0:HLOS` container layout documented
+here (ELF32 wrapper + FIT payload + partnumber-named config) is what
+`bootipq` expects.
+
 ## Enabling root password login (post-root)
 
 Out of the box, root password login over SSH **never works** on this firmware,
