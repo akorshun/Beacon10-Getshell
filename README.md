@@ -79,6 +79,20 @@ Web login has a per-account failure counter: too many bad attempts give
 *"Too many failed attempts, account temporarily locked"* — go easy on
 dictionary attempts. Password policy: 8–24 chars from `!#+,-./:=@_` + alnum.
 
+**Password validator rules** (in the `cfgcli -s` set path, verified by
+probing `WebAccount.Password`):
+
+- must contain at least one uppercase letter (`super@12345` rejected,
+  `Super@12345` accepted);
+- must not match **or contain** another account's password, case-insensitively
+  — with admin's password being the label value `vc7duczgx9yzfr`, even
+  `Vc7duczgx9yzfr`, `vc7duczgx9yzfr!` and `vc7duczgx9yzfrX` are all rejected.
+
+Consequence: superadmin's password can never equal the label/admin password
+while admin keeps it — the two accounts can't share a password. Either keep
+distinct passwords, or change admin's first (symmetric rule then blocks admin
+from taking superadmin's).
+
 ## Enabling root password login (post-root)
 
 Out of the box, root password login over SSH **never works** on this firmware,
