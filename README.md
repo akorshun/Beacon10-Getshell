@@ -93,6 +93,42 @@ while admin keeps it — the two accounts can't share a password. Either keep
 distinct passwords, or change admin's first (symmetric rule then blocks admin
 from taking superadmin's).
 
+## Persistence: config-DB user recreated as uid=0 at every boot (verified)
+
+`cfgmgr` applies `InternetGatewayDevice.X_Authentication.TelnetSshAccount` and
+creates a **uid=0 Linux account from the persistent config DB** on every boot
+(the shadow hash is re-generated each boot — the entry is rebuilt, not
+restored):
+
+```bash
+cfgcli -s "InternetGatewayDevice.X_Authentication.TelnetSshAccount.Enable" "true"
+cfgcli -s "InternetGatewayDevice.X_Authentication.TelnetSshAccount.UserName" "svcroot"
+cfgcli -s "InternetGatewayDevice.X_Authentication.TelnetSshAccount.Password" 'Persist@Root1'
+cfgcli --save-flash-now
+# -> /etc/passwd: svcroot:x:0:102::/home/svcroot:/usr/bin/vtysh  (recreated each boot)
+```
+
+The account is not named `root`, so the PAM `access.conf` root-deny does not
+apply; SSH password login works and **survives reboots** (verified by rebooting).
+The shell is the vendor Quagga vtysh (`Beacon 10#`, uid=0). Its `shell` escape
+to a full UNIX shell asks for a second password (`Password2:` — vendor-added,
+not `zebra`, not the login password, not configurable via the stripped-down
+vtysh; 3 wrong answers → 300 s lockout). A full root shell after reboot is
+already provided by the dropbear key in `/configs/overlay/etc/dropbear/authorized_keys`.
+
+Related boot mechanics (all verified):
+- `/configs` is ext4 on `mmcblk0p31` via loop0 — the only persistent writable
+  store. `/etc/config` is a baked symlink to `/configs/overlay/etc/config`
+  (persistent UCI), `/etc/dropbear` → `/configs/overlay/etc/dropbear`.
+- `/etc/shadow` is a symlink to tmpfs; `/etc/preinit` re-seeds it from
+  `/usr/etc/shadow`, then `cfgmgr` adds the TelnetSshAccount user on top.
+- `X_ASB_COM_BDAccount` ("backdoor account", Enable=true by default, empty
+  credentials) looks like the sibling mechanism — setting it does nothing on
+  this build (`2402b.04.09.A17`); only TelnetSshAccount is applied.
+- `cfgmgr` also contains a `-g 0` useradd variant (`useradd --badnames -o -u 0
+  -g 0`) — reachable from other code paths (OmciDB/UserInfo), not via
+  TelnetSshAccount (always gid 102, shell hardcoded `/usr/bin/vtysh`).
+
 ## Enabling root password login (post-root)
 
 Out of the box, root password login over SSH **never works** on this firmware,
