@@ -41,3 +41,46 @@ generated automatically. After a successful run:
 ```bash
 ssh -i nokiakey root@192.168.12.1
 ```
+
+## Enabling root password login (post-root)
+
+Out of the box, root password login over SSH **never works** on this firmware,
+even with a correct password. Three things are going on (all verified on
+`2402b.04.09.A17`):
+
+1. **PAM blocks root.** The vendor dropbear (v2020.81) is built with PAM, and
+   `/etc/security/access.conf` contains:
+   ```
+   -:root EXCEPT (wheel) :ALL
+   ```
+   `pam_acct_mgmt()` rejects root with `Permission denied` *before* the password
+   is even checked — dropbear logs `Bad PAM password attempt for 'root'`.
+   Fix: replace that line with `+ : root : ALL`.
+
+2. **No lockout safety net.** `/etc/pam.d/sshd` includes `pam_faillock` with
+   `deny=3 unlock_time=300 even_deny_root` — 3 wrong password attempts lock
+   root out for 5 minutes *even with the correct password*. State lives in
+   `/var/run/faillock/`; clear it (`: > /var/run/faillock/root`) or wait it out.
+
+3. **The password does not survive a reboot.** `/etc/shadow` is a symlink into
+   tmpfs; `/etc/preinit` re-seeds it from the read-only image (`/usr/etc/shadow`)
+   at every boot. So the access.conf fix and the password are both session-only
+   (until reboot). The only persistent access is the SSH key dropbear reads from
+   `/configs/overlay/etc/dropbear/authorized_keys` (persistent ext4 at
+   `/configs`).
+
+One-liner to enable password login after getting root (lost on reboot):
+
+```bash
+sed -i 's/^-:root EXCEPT (wheel) :ALL/+ : root : ALL/' /etc/security/access.conf
+echo 'root:NEWPASS' | chpasswd
+: > /var/run/faillock/root
+```
+
+Notes:
+- `chpasswd`/`passwd` write a SHA-crypt (`$5$`) hash; dropbear's PAM `pam_unix`
+  also accepts an MD5 (`$1$`) hash if you edit `/tmp/shadow` directly — beware
+  of shell-quoting the `$` characters when doing so over SSH.
+- Firewall: LAN input is restricted to port 22 — extra listeners (e.g. a debug
+  `dropbear -p 2222`) are unreachable from LAN. Use an SSH port-forward over 22
+  for that.
